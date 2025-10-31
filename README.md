@@ -6,6 +6,7 @@ This repository has been modified in the following ways:
 - Learned rules can be written to a prolog file
 - Training can use mixed precision to reduce memory footprint when necessary
 - The `nonisomorphic_rules` dataset was added for testing rule expressivity
+- `pixi.toml` and `pixi.lock` files are included for use with the pixi workspace system for reproducibility 
 
 ## KG Data:
 * entities.txt: a collection of entities in the KG
