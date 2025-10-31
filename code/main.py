@@ -188,7 +188,7 @@ def train(args, dataset):
     print_msg("  Start training  ")
     batch_size = 5000
     emb_size = 1024
-    n_epoch = 1500
+    n_epoch = 100 #1500
     lr = 0.000025
 
     model = Encoder(rdict.__len__(), emb_size, device)
@@ -267,6 +267,31 @@ def enumerate_body_subset(allowed_idx, rdict, body_len):
     idx2rel = rdict.idx2rel
     all_body = [[idx2rel[x] for x in b_idx_] for b_idx_ in all_body_idx]
     return all_body_idx, all_body
+
+def safe_head_name(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in name)
+
+def append_text_rules(head_rdict, allowed_head_idx, topk, out_path):
+    """
+    Append the currently available rule_conf/candidate_rule to a single text file.
+    Writes per-head, per-length top-k rules.
+    """
+    with open(out_path, 'a', encoding='utf-8') as g:
+        for rule_len in sorted(rule_conf.keys()):
+            sorted_val, sorted_idx = torch.sort(rule_conf[rule_len], 0, descending=True)
+            n_rules, _ = sorted_val.shape
+            g.write(f"\n### Rule length: {rule_len}\n")
+            for r in allowed_head_idx:
+                head = head_rdict.idx2rel[r]
+                g.write(f"# Head: {head}\n")
+                idx = 0
+                while idx < topk and idx < n_rules:
+                    conf = sorted_val[idx, r].item()
+                    body = candidate_rule[rule_len][sorted_idx[idx, r].item()]
+                    msg = "{:.6f}\t{} <-- ".format(conf, head)
+                    msg += ", ".join(body.split('|'))
+                    g.write(msg + '\n')
+                    idx += 1
 
 def test(args, dataset):
     head_rdict = dataset.get_head_relation_dict()
@@ -380,6 +405,7 @@ if __name__ == '__main__':
     parser.add_argument("--body_rels", default="", help="Comma-separated list or @file of predicates allowed in rule bodies")
     parser.add_argument("--prolog_out", default="", help="If set, also write rules to a Prolog file at this path (e.g., ./rules.pl)")
     parser.add_argument("--mixed_precision", action="store_true", help="enable mixed precision training")
+    parser.add_argument("--per_head_loop", action="store_true", help="Iterate each target head one at a time (train/test/write) and append to single file(s)")
 
     args = parser.parse_args()
     assert args.train or args.test
@@ -399,56 +425,119 @@ if __name__ == '__main__':
     model_path = '../results/{}'.format(args.model)
     print("Model:{}".format(model_path))
 
-    if args.train:
-        print_msg("Train!")
-        train(args, dataset)
+    if args.per_head_loop:
+         # Resolve target_heads
+        th = parse_name_list(args.target_heads) or set()
+        if not th:
+            raise ValueError("--per_head_loop requires --target_heads to be set (one or more heads)")
+        # Use stable order
+        heads_list = sorted(th)
 
-    if args.test:
-        print_msg("Test!")
-        test(args, dataset)
-            
-        if args.get_rule:
-            print_msg("Generate Rule!")
-            
-            head_rdict = dataset.get_head_relation_dict()
+        if args.prolog_out:
+            # Clear previous content
+            with open(args.prolog_out, 'w', encoding='utf-8') as f:
+                f.write("% Consolidated Prolog rules\n")
 
-            # Reuse the same allowed head filter here for writing
-            allowed_heads = parse_name_list(getattr(args, "target_heads", "")) or None
-            if allowed_heads:
-                allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r in allowed_heads]
-            else:
-                allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r != "None" and not r.startswith("inv_")]
-            if not allowed_head_idx:
-                print("WARNING: no heads to write; check --target_heads")
-            
-            for rule_len in rule_conf:
-                rule_path = "./{}_{}_{}.txt".format(args.output_file, args.topk, rule_len)
-                print("\nrule length:{}".format(rule_len))
-                sorted_val, sorted_idx = torch.sort(rule_conf[rule_len], 0, descending=True)
+        for h in heads_list:
+            try:
+                print_msg(f"=== Per-head pass for: {h} ===")
 
-                n_rules, n_heads = sorted_val.shape
-                print(f"Writing heads: {[head_rdict.idx2rel[i] for i in allowed_head_idx]}")
+                # Clone args and specialize for this head
+                a = copy.deepcopy(args)
+                a.target_heads = h  # single head
+                # Use per-head model file to avoid overwrite
+                a.model = f"{args.model}.{safe_head_name(h)}"
 
-                with open(rule_path, 'w') as g:
-                    for r in allowed_head_idx:
-                        head = head_rdict.idx2rel[r]
-                        idx = 0
-                        # Take top-k bodies for this head
-                        while idx<args.topk and idx<n_rules:
-                            conf = sorted_val[idx, r].item()
-                            body = candidate_rule[rule_len][sorted_idx[idx, r].item()]
-                            msg = "{:.3f} ({:.3f})\t{} <-- ".format(conf, conf, head)
-                            body = body.split('|')
-                            msg += ", ".join(body)
-                            g.write(msg + '\n')
-                            idx+=1
-            if args.prolog_out:
-                print_msg(f"Writing Prolog rules to {args.prolog_out}")
-                write_prolog_rules(
-                    head_rdict=head_rdict,
-                    candidate_rule=candidate_rule,
-                    rule_conf=rule_conf,
-                    allowed_head_idx=allowed_head_idx,
-                    topk=args.topk,
-                    out_path=args.prolog_out,
-                )
+                if a.train:
+                    print_msg("Train!")
+                    train(a, dataset)
+
+                if a.test:
+                    print_msg("Test!")
+                    # reset global stores for clean per-head content
+                    rule_conf.clear()
+                    candidate_rule.clear()
+                    test(a, dataset)
+
+                    if a.get_rule:
+                        print_msg("Generate Rule!")
+
+                        head_rdict = dataset.get_head_relation_dict()
+                        # Resolve allowed head idx for this single head
+                        allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r == h]
+                        if not allowed_head_idx:
+                            print(f"WARNING: head {h} not found in relation dict; skipping write")
+                            continue
+
+                        # Append Prolog writer if requested
+                        if args.prolog_out:
+                            write_prolog_rules(
+                                head_rdict=head_rdict,
+                                candidate_rule=candidate_rule,
+                                rule_conf=rule_conf,
+                                allowed_head_idx=allowed_head_idx,
+                                topk=a.topk,
+                                out_path=args.prolog_out,
+                                include_conf_as_comment=True,
+                                append=True,  # NEW param
+                            )
+            except Exception as e:
+                print(f"Skipping target after encountering exception: {e}")
+                continue
+
+        # Done with per-head loop
+        raise SystemExit(0)
+    else:
+        if args.train:
+            print_msg("Train!")
+            train(args, dataset)
+
+        if args.test:
+            print_msg("Test!")
+            test(args, dataset)
+                
+            if args.get_rule:
+                print_msg("Generate Rule!")
+                
+                head_rdict = dataset.get_head_relation_dict()
+
+                # Reuse the same allowed head filter here for writing
+                allowed_heads = parse_name_list(getattr(args, "target_heads", "")) or None
+                if allowed_heads:
+                    allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r in allowed_heads]
+                else:
+                    allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r != "None" and not r.startswith("inv_")]
+                if not allowed_head_idx:
+                    print("WARNING: no heads to write; check --target_heads")
+                
+                for rule_len in rule_conf:
+                    rule_path = "./{}_{}_{}.txt".format(args.output_file, args.topk, rule_len)
+                    print("\nrule length:{}".format(rule_len))
+                    sorted_val, sorted_idx = torch.sort(rule_conf[rule_len], 0, descending=True)
+
+                    n_rules, n_heads = sorted_val.shape
+                    print(f"Writing heads: {[head_rdict.idx2rel[i] for i in allowed_head_idx]}")
+
+                    with open(rule_path, 'w') as g:
+                        for r in allowed_head_idx:
+                            head = head_rdict.idx2rel[r]
+                            idx = 0
+                            # Take top-k bodies for this head
+                            while idx<args.topk and idx<n_rules:
+                                conf = sorted_val[idx, r].item()
+                                body = candidate_rule[rule_len][sorted_idx[idx, r].item()]
+                                msg = "{:.3f} ({:.3f})\t{} <-- ".format(conf, conf, head)
+                                body = body.split('|')
+                                msg += ", ".join(body)
+                                g.write(msg + '\n')
+                                idx+=1
+                if args.prolog_out:
+                    print_msg(f"Writing Prolog rules to {args.prolog_out}")
+                    write_prolog_rules(
+                        head_rdict=head_rdict,
+                        candidate_rule=candidate_rule,
+                        rule_conf=rule_conf,
+                        allowed_head_idx=allowed_head_idx,
+                        topk=args.topk,
+                        out_path=args.prolog_out,
+                    )

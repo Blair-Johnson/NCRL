@@ -7,5 +7,5 @@ BACKGROUND_PREDS[8]="di_edge_0,inv_di_edge_0,di_edge_1,inv_di_edge_1,di_edge_2,i
 
 for NPREDS in 2 4 8
 do
-    python main.py --train --data "nonisomorphic_rules/tsv/r${NPREDS}" --max_path_len 5 --model "r${NPREDS}_model" --gpu 0 --get_rule --topk 16 --target_heads "@../datasets/nonisomorphic_rules/tsv/r${NPREDS}/label_relations.txt" --body_rels "${BACKGROUND_PREDS[${NPREDS}]}" --output_file "r${NPREDS}_ckpt" --test --prolog_out "../results/learned_rules_r${NPREDS}.pl" --mixed_precision --anchor 1000
+    python main.py --train --data "nonisomorphic_rules/tsv/r${NPREDS}" --max_path_len 5 --model "r${NPREDS}_model" --gpu 0 --get_rule --topk 16 --target_heads "@../datasets/nonisomorphic_rules/tsv/r${NPREDS}/label_relations.txt" --body_rels "${BACKGROUND_PREDS[${NPREDS}]}" --output_file "r${NPREDS}_ckpt" --test --prolog_out "../results/learned_rules_r${NPREDS}.pl" --mixed_precision --per_head_loop
 done
