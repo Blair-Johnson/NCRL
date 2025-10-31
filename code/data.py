@@ -159,6 +159,15 @@ def sample_anchor_rdf(rdf_data, num=1):
     else:
         return rdf_data
 
+def construct_descendant_for_rels(rdf_data, allowed_rels=None):
+    """
+    Build descendant map (head -> list of (rel, tail)) using only allowed_rels if provided.
+    """
+    if allowed_rels is None:
+        return construct_descendant(rdf_data)
+    filtered = [rdf for rdf in rdf_data if parse_rdf(rdf)[1] in allowed_rels]
+    return construct_descendant(filtered)
+
 def construct_descendant(rdf_data):
     # take entity as h, map it to its r, t
     entity2desced = {}
@@ -183,7 +192,7 @@ def connected(entity2desced, head, tail):
         return False
 
     
-def construct_rule_seq(rdf_data, anchor_rdf, entity2desced, max_path_len=2, PRINT=False):    
+def construct_rule_seq_old(rdf_data, anchor_rdf, entity2desced, max_path_len=2, PRINT=False):    
     len2seq = {}
     anchor_h, anchor_r, anchor_t = parse_rdf(anchor_rdf)
     # Search
@@ -228,6 +237,51 @@ def construct_rule_seq(rdf_data, anchor_rdf, entity2desced, max_path_len=2, PRIN
                 print('rule:\n{}\n'.format(rule))
     return rule_seq, record
 
+def construct_rule_seq(anchor_rdf, entity2desced_body, entity2desced_head, max_path_len=2, PRINT=False):
+    """
+    Mine rule sequences from an anchor triple.
+    - entity2desced_body is used to traverse the graph (body/background relations).
+    - entity2desced_head is used only to check if anchor_h connects directly to cur_t (head/target relations).
+    """
+    len2seq = {}
+    anchor_h, anchor_r, anchor_t = parse_rdf(anchor_rdf)
+    stack = [(anchor_h, anchor_r, anchor_t)]
+    stack_print = ['{}-{}-{}'.format(anchor_h, anchor_r, anchor_t)]
+    rule_seq, expended_node = [], []
+    record = []
+
+    while len(stack) > 0:
+        cur_h, cur_r, cur_t = stack.pop(-1)
+        cur_print = stack_print.pop(-1)
+
+        deced_list = entity2desced_body.get(cur_t, [])
+
+        # Expand path if within length and not revisiting node
+        if len(cur_r.split('|')) < max_path_len and len(deced_list) > 0 and cur_t not in expended_node:
+            for r_next, t_next in deced_list:
+                if t_next != cur_h and t_next != anchor_h:
+                    stack.append((cur_t, cur_r + '|' + r_next, t_next))
+                    stack_print.append(cur_print + '-{}-{}'.format(r_next, t_next))
+        expended_node.append(cur_t)
+
+        # Check for a direct head relation from anchor_h -> cur_t using the head graph
+        rule_head_rel = connected(entity2desced_head, anchor_h, cur_t)
+        if rule_head_rel and cur_t != anchor_t:
+            rule = cur_r + '-' + rule_head_rel
+            rule_seq.append(rule)
+            # Record this “positive” detection
+            rec_item = (anchor_h, rule_head_rel, cur_t)
+            if rec_item not in record:
+                record.append(rec_item)
+            if PRINT:
+                print('rule body:\n{}'.format(cur_print))
+                print('rule head:\n{}-{}-{}'.format(anchor_h, rule_head_rel, cur_t))
+                print('rule:\n{}\n'.format(rule))
+        elif rule_head_rel is False:
+            # Optional: keep a small sample of negatives
+            pass
+
+    return rule_seq, record
 
 def body2idx(body_list, head_rdict):
     """

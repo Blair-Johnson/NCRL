@@ -21,6 +21,30 @@ head2mrr = defaultdict(list)
 head2hit_10 = defaultdict(list)
 head2hit_1 = defaultdict(list)
 
+def parse_name_list(arg):
+    if not arg: return None
+    if arg.startswith('@'):
+        with open(arg[1:], 'r') as f:
+            items = [line.strip() for line in f if line.strip()]
+    else:
+        items = [x.strip() for x in arg.split(',') if x.strip()]
+    return set(items)
+
+def load_rules(rule_path, all_rules, all_heads, target_heads=None, body_rels=None):
+    with open(rule_path, 'r') as f:
+        rules = f.readlines()
+        for rule in rules:
+            conf, r = rule.strip('\n').split('\t')
+            conf_1, conf_2 = float(conf[0:5]), float(conf[-6:-1])
+            head, body = parse_rule(r)
+            if target_heads and head not in target_heads:
+                continue
+            if body_rels and not all(b in body_rels for b in body):
+                continue
+            all_rules.setdefault(head, []).append((head, body, conf_1, conf_2))
+            if head not in all_heads:
+                all_heads.append(head)
+
 class RuleDataset(Dataset):
     def __init__(self, r2mat, rules, e_num,idx2rel, args):
         self.e_num = e_num
@@ -40,6 +64,7 @@ class RuleDataset(Dataset):
         for rule in _rules:
             head, body, conf_1, conf_2 = rule
 
+            # NOTE: counts paths from each head to all tails via path defined by rule
             body_adj = sparse.eye(self.e_num)
             for b_rel in body:
                 body_adj = body_adj * self.r2mat[b_rel] 
@@ -82,27 +107,12 @@ def parse_rule(r):
     return head, body
 
 
-def load_rules(rule_path,all_rules,all_heads):
-    with open(rule_path, 'r') as f:
-        rules = f.readlines()
-        for i_, rule in enumerate(rules):
-            conf, r = rule.strip('\n').split('\t')
-            conf_1, conf_2 = float(conf[0:5]), float(conf[-6:-1])
-            head, body = parse_rule(r)
-            # rule item: (head, body, conf_1, conf_2)
-            if head not in all_rules:
-                all_rules[head] = []
-            all_rules[head].append((head, body, conf_1, conf_2))
-            
-            if head not in all_heads:
-                all_heads.append(head)
-
-
 def construct_rmat(idx2rel, idx2ent, ent2idx, fact_rdf):
     e_num = len(idx2ent)
     r2mat = {}
     # initialize rmat
     for idx, rel in idx2rel.items():
+        # NOTE: dictionary of keys matrix for each relation type
         mat = sparse.dok_matrix((e_num, e_num))
         r2mat[rel] = mat
     # fill rmat
@@ -130,19 +140,20 @@ def kg_completion(rules, dataset, args):
     Input a set of rules
     Complete Querys from test_rdf based on rules and fact_rdf 
     """
-    # rdf_data
     fact_rdf, train_rdf, valid_rdf, test_rdf = dataset.fact_rdf, dataset.train_rdf, dataset.valid_rdf, dataset.test_rdf
-    # groud truth
-    gt = get_gt(dataset)
-    # relation
     rdict = dataset.get_relation_dict()
     head_rdict = dataset.get_head_relation_dict()
     rel2idx, idx2rel = rdict.rel2idx, rdict.idx2rel
-    # entity
     idx2ent, ent2idx = dataset.idx2ent, dataset.ent2idx
     e_num = len(idx2ent)
-    # construct relation matrix (following Neural-LP)
-    r2mat = construct_rmat(idx2rel, idx2ent, ent2idx, fact_rdf+train_rdf+valid_rdf)
+
+    allowed_body = parse_name_list(args.body_rels) if hasattr(args, 'body_rels') else None
+    bg_rdf = fact_rdf + train_rdf + valid_rdf
+    if allowed_body:
+        bg_rdf = [rdf for rdf in bg_rdf if parse_rdf(rdf)[1] in allowed_body]
+
+    r2mat = construct_rmat(idx2rel, idx2ent, ent2idx, bg_rdf)
+    # NOTE: r2mat is a dictionary of sparse boolean arrays containing all the facts, train, valid edges
 
     # Eval Metric
     body2mat  = {}
@@ -155,9 +166,13 @@ def kg_completion(rules, dataset, args):
             num_workers=max(1, args.cpu_num//2),
             collate_fn=RuleDataset.collate_fn
         )
+    print(f'len rule loader: {len(rule_loader)}')
     
+    # NOTE: "epoch" is predicate id
     for epoch, sample in enumerate(rule_loader):
         heads, score_counts = sample
+        print(f'heads: {heads}')
+        print(f'score counts: {score_counts}')
         
         for idx in range(len(heads)):
             head = heads[idx]
@@ -167,17 +182,27 @@ def kg_completion(rules, dataset, args):
     
     mrr, hits_1, hits_10  = [], [], []
     
+    print(f'len trdf: {len(test_rdf)}')
     for q_i, query_rdf in enumerate(test_rdf):
+        print(f'qi: {q_i}')
+        print(f'query_rdf: {query_rdf}')
         query = parse_rdf(query_rdf)
+        print(f'query: {query}')
         q_h, q_r, q_t = query
+        print(f'tuple: {(q_h, q_r, q_t)}')
         if q_r not in body2mat:
             continue
+        print(f'b2mat: {body2mat["aunt"]}')
         print ("{}\t{}\t{}".format(q_h, q_r, q_t))
         pred = np.squeeze(np.array(body2mat[q_r][ent2idx[q_h]]))
+        print(f'pred.shape: {pred.shape}')
         
         pred_ranks = np.argsort(pred)[::-1]    
+        print(f'pred ranks: {pred_ranks}')
 
+        # NOTE: gt contains all triples
         truth = gt[(q_h, q_r)]
+        print(f'truth: {truth}')
         truth = [t for t in truth if t!=ent2idx[q_t]]
         
         filtered_ranks = []
@@ -196,6 +221,7 @@ def kg_completion(rules, dataset, args):
         head2hit_1[q_r].append(1 if rank<=1 else 0)
         head2hit_10[q_r].append(1 if rank<=10 else 0)
         print("rank at {}: {}".format(q_i, rank))
+        print(hi)
 
 
     print("MRR: {} Hits@1: {} Hits@10: {}".format(np.mean(mrr), np.mean(hits_1), np.mean(hits_10)))
@@ -223,9 +249,9 @@ if __name__ == "__main__":
     all_rules = {}
     all_rule_heads = []
    
-    for L in range(2,4):
-        file = "{}/{}_500_{}.txt".format(args.rule, args.rule, L)
-        load_rules("{}".format(file), all_rules, all_rule_heads)
+    #for L in range(2,4):
+    file = "{}/{}_64_{}.txt".format(args.rule, args.rule, 4)
+    load_rules("{}".format(file), all_rules, all_rule_heads)
     
     for head in all_rules:
         all_rules[head] = all_rules[head][:args.top]
