@@ -1,6 +1,11 @@
 # NCRL
 ## Introduction
-The official Pytorch implementation of the paper Neural Compositional Rule Learning for Knowledge Graph Reasoning
+This is a fork of the PyTorch implementation of the paper Neural Compositional Rule Learning for Knowledge Graph Reasoning.
+This repository has been modified in the following ways:
+- Sets of target and background predicates can be specified to constrain rule learning
+- Learned rules can be written to a prolog file
+- Training can use mixed precision to reduce memory footprint when necessary
+- The `nonisomorphic_rules` dataset was added for testing rule expressivity
 
 ## KG Data:
 * entities.txt: a collection of entities in the KG
