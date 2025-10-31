@@ -14,7 +14,7 @@ from data import *
 from utils import *
 from model import *
 from prolog_writer import write_prolog_rules
-
+from torch.cuda.amp import autocast, GradScaler
 
 import debugpy
 # debugpy.listen(5695)
@@ -142,118 +142,6 @@ def sample_training_data(max_path_len, anchor_num, head_triplets_by_head, entity
         print(f"sampled examples for rule of length {rule_len}: {len(len2train_rule_idx[rule_len])}")
     return len2train_rule_idx
 
-def train_old(args, dataset):
-    rdict = dataset.get_relation_dict()
-    head_rdict = dataset.get_head_relation_dict()
-    all_rdf = dataset.fact_rdf + dataset.train_rdf + dataset.valid_rdf
-
-    # Filter traversal/background graph to body_rels if provided
-    if args.body_rels:
-        allowed_body = parse_name_list(args.body_rels)
-        body_rdf = [rdf for rdf in all_rdf if parse_rdf(rdf)[1] in allowed_body]
-    else:
-        body_rdf = all_rdf
-
-    # Build descendant index only over background relations
-    entity2desced = construct_descendant(body_rdf)
-
-    relation_num = rdict.__len__()
-    max_path_len = args.max_path_len
-    anchor_num = args.anchor
-
-    len2train_rule_idx = sample_training_data(
-        max_path_len=max_path_len,
-        anchor_num=anchor_num,
-        # Use original facts for head-anchor sampling
-        fact_rdf=all_rdf,
-        # Provide body_rdf for traversal inside rule mining
-        entity2desced=entity2desced,
-        head_rdict=head_rdict,
-        target_heads=parse_name_list(args.target_heads),
-        body_rels=parse_name_list(args.body_rels),
-        body_rdf_for_paths=body_rdf
-    )
-    print_msg("  Start training  ")
-    # model parameter
-    batch_size = 5000
-    emb_size = 1024
-    
-    # train parameter
-    n_epoch = 750
-    lr = 0.000025
-    
-    #body_len_range = list(range(2,max_path_len+1))
-    body_len_range = sorted(len2train_rule_idx.keys())
-    if not body_len_range:
-        print("No training examples were generated. Try increasing --anchor or relaxing --body_rels/--target_heads.")
-        return
-    print ("body_len_range",body_len_range)
-    
-    # model
-    model = Encoder(relation_num, emb_size, device)
-        
-    if torch.cuda.is_available():
-        model = model.cuda()
-        
-    # loss
-    loss_func_head = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    
-    """
-    Training
-    """
-    model.train()
-    start = time.time()
-    train_acc = {}
-
-    for rule_len in body_len_range:
-        rule_ = len2train_rule_idx[rule_len]
-        print("\nrule length:{}".format(rule_len))
-        
-        train_acc[rule_len] = []
-        for epoch in range(n_epoch):
-            model.zero_grad()
-            if len(rule_) > batch_size:
-                sample_rule_ = sample(rule_, batch_size) #[[17,21,-1,23],[2,23,-1,8],...]
-            else:
-                sample_rule_ = rule_
-            body_ = [r_[0:-2] for r_ in sample_rule_] #[[17,21],[2,23],...]
-            head_ = [r_[-1] for r_ in sample_rule_] #[23,8,...]
-
-            inputs_h = body_
-            targets_h = head_
-            
-            # stack list into Tensor
-            inputs_h = torch.stack(inputs_h, 0).to(device)
-            targets_h = torch.stack(targets_h, 0).to(device)
-            
-            # forward pass 
-            pred_head, _entropy_loss = model(inputs_h)
-        
-            
-            loss_head = loss_func_head(pred_head, targets_h.reshape(-1))
-            
-            entropy_loss = _entropy_loss.mean()
-        
-            loss = args.alpha * loss_head + (1-args.alpha) * entropy_loss
-
-            
-            if epoch % (n_epoch//10) == 0:
-                print("### epoch:{}\tloss_head:{:.3}\tentropy_loss:{:.3}\tloss:{:.3}\t".format(epoch, loss_head, entropy_loss,loss))
-                
-            train_acc[rule_len].append(((pred_head.argmax(dim=1) == targets_h.reshape(-1)).sum() / pred_head.shape[0]).cpu().numpy())
-            
-            # backward and optimize
-            clip_grad_norm_(model.parameters(), 0.5)
-            loss.backward()
-            optimizer.step()
-        
-    end = time.time()
-    print("Time usage: {:.2}".format(end - start))
-        
-    print("Saving model...")
-    with open('../results/{}'.format(args.model), 'wb') as g:
-        pickle.dump(model, g)
         
 def train(args, dataset):
     rdict = dataset.get_relation_dict()
@@ -309,7 +197,8 @@ def train(args, dataset):
 
     loss_func_head = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
+    amp_enabled = (device.type == 'cuda')
+    scaler = GradScaler(enabled=amp_enabled and args.mixed_precision)
     model.train()
     train_acc = {}
 
@@ -339,10 +228,11 @@ def train(args, dataset):
             inputs_h = torch.stack(body_, 0).to(device)
             targets_h = torch.stack(head_, 0).to(device)
 
-            pred_head, _entropy_loss = model(inputs_h)
-            loss_head = loss_func_head(pred_head, targets_h.reshape(-1))
-            entropy_loss = _entropy_loss.mean()
-            loss = args.alpha * loss_head + (1 - args.alpha) * entropy_loss
+            with autocast(enabled=amp_enabled):
+                pred_head, _entropy_loss = model(inputs_h)
+                loss_head = loss_func_head(pred_head, targets_h.reshape(-1))
+                entropy_loss = _entropy_loss.mean()
+                loss = args.alpha * loss_head + (1 - args.alpha) * entropy_loss
 
             if epoch % (n_epoch // 10) == 0:
                 print("### epoch:{}\tloss_head:{:.3}\tentropy_loss:{:.3}\tloss:{:.3}\t".format(epoch, loss_head, entropy_loss, loss))
@@ -350,8 +240,11 @@ def train(args, dataset):
             train_acc[rule_len].append(((pred_head.argmax(dim=1) == targets_h.reshape(-1)).sum() / pred_head.shape[0]).cpu().numpy())
 
             clip_grad_norm_(model.parameters(), 0.5)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            clip_grad_norm_(model.parameters(), 0.5)
+            scaler.step(optimizer)
+            scaler.update()
 
     print("Saving model...")
     with open('../results/{}'.format(args.model), 'wb') as g:
@@ -374,59 +267,6 @@ def enumerate_body_subset(allowed_idx, rdict, body_len):
     idx2rel = rdict.idx2rel
     all_body = [[idx2rel[x] for x in b_idx_] for b_idx_ in all_body_idx]
     return all_body_idx, all_body
-
-def test_old(args, dataset):
-    head_rdict = dataset.get_head_relation_dict()
-    with open('../results/{}'.format(args.model), 'rb') as g:
-        if torch.cuda.is_available():
-            model = pickle.load(g)
-            model.to(device)
-        else:
-            model = torch.load(g, map_location='cpu')
-    print_msg("  Start Eval  ")
-    model.eval()    
-    #body_list = ['brother|bro|brother|daughter'] 
-    r_num = head_rdict.__len__()-1
-    
-    # model parameter
-    batch_size = 1000
-    
-    rule_len = args.learned_path_len
-    print("\nrule length:{}".format(rule_len))
-    if args.body_rels:
-        allowed_body = parse_name_list(args.body_rels)
-        allowed_idx = [head_rdict.rel2idx[r] for r in allowed_body if r in head_rdict.rel2idx]
-    else:
-        allowed_idx = list(range(head_rdict.__len__()-1))
-
-    probs = []
-    _, body = enumerate_body_subset(allowed_idx, head_rdict, body_len=rule_len)
-    body_list = ["|".join(b) for b in body]
-    
-    candidate_rule[rule_len] = body_list
-    n_epoches = math.ceil(float(len(body_list))/ batch_size)
-    for epoches in range(n_epoches):
-        bodies = body_list[epoches: (epoches+1)*batch_size]
-        if epoches == n_epoches-1:
-            bodies = body_list[epoches*batch_size:]
-        else:
-            bodies = body_list[epoches*batch_size: (epoches+1)*batch_size]
-            
-        body_idx = body2idx(bodies, head_rdict) 
-        if torch.cuda.is_available():
-            inputs = torch.LongTensor(np.array(body_idx)).to(device)
-        else:
-            inputs = torch.LongTensor(np.array(body_idx))
-            
-        print("## body {}".format((epoches+1)* batch_size))
-            
-        with torch.no_grad():
-            pred_head, _entropy_loss = model(inputs) # [batch_size, 2*n_rel+1]
-            prob_ = torch.softmax(pred_head, dim=-1)
-            probs.append(prob_.detach().cpu())
-      
-    rule_conf[rule_len] = torch.cat(probs,dim=0)
-    print ("rule_conf",rule_conf[rule_len].shape)
 
 def test(args, dataset):
     head_rdict = dataset.get_head_relation_dict()
@@ -536,6 +376,7 @@ if __name__ == '__main__':
     parser.add_argument("--target_heads", default="", help="Comma-separated list or @file of head predicates to learn")
     parser.add_argument("--body_rels", default="", help="Comma-separated list or @file of predicates allowed in rule bodies")
     parser.add_argument("--prolog_out", default="", help="If set, also write rules to a Prolog file at this path (e.g., ./rules.pl)")
+    parser.add_argument("--mixed_precision", action="store_true", help="enable mixed precision training")
 
     args = parser.parse_args()
     assert args.train or args.test
