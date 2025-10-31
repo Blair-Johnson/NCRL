@@ -374,7 +374,7 @@ def enumerate_body_subset(allowed_idx, rdict, body_len):
     all_body = [[idx2rel[x] for x in b_idx_] for b_idx_ in all_body_idx]
     return all_body_idx, all_body
 
-def test(args, dataset):
+def test_old(args, dataset):
     head_rdict = dataset.get_head_relation_dict()
     with open('../results/{}'.format(args.model), 'rb') as g:
         if torch.cuda.is_available():
@@ -421,6 +421,94 @@ def test(args, dataset):
             
         with torch.no_grad():
             pred_head, _entropy_loss = model(inputs) # [batch_size, 2*n_rel+1]
+            prob_ = torch.softmax(pred_head, dim=-1)
+            probs.append(prob_.detach().cpu())
+      
+    rule_conf[rule_len] = torch.cat(probs,dim=0)
+    print ("rule_conf",rule_conf[rule_len].shape)
+
+def test(args, dataset):
+    head_rdict = dataset.get_head_relation_dict()
+
+    # Parse user subsets
+    allowed_heads = parse_name_list(getattr(args, "target_heads", "")) or None
+    allowed_body = parse_name_list(getattr(args, "body_rels", "")) or None
+
+    # Build list of allowed head indices (exclude None and inv_)
+    if allowed_heads:
+        allowed_head_idx = [i for i, r in head_rdict.idx2rel.items()
+                            if r in allowed_heads]
+    else:
+        allowed_head_idx = [i for i, r in head_rdict.idx2rel.items()
+                            if r != "None" and not r.startswith("inv_")]
+
+    if len(allowed_head_idx) == 0:
+        print("WARNING: No allowed heads resolved from --target_heads; rule extraction will be empty.")
+    else:
+        print("Allowed head relations for rule extraction:")
+        for i in allowed_head_idx:
+            print("  -", head_rdict.idx2rel[i])
+
+    # Build allowed body relation indices
+    if allowed_body:
+        allowed_body_idx = [head_rdict.rel2idx[r] for r in allowed_body if r in head_rdict.rel2idx]
+        print("Allowed body relations:")
+        for r in allowed_body:
+            print("  -", r, "(known)" if r in head_rdict.rel2idx else "(UNKNOWN NAME)")
+        if not allowed_body_idx:
+            print("WARNING: No allowed body relations mapped to indices; falling back to all relations.")
+    else:
+        allowed_body_idx = None
+
+    with open('../results/{}'.format(args.model), 'rb') as g:
+        if torch.cuda.is_available():
+            model = pickle.load(g)
+            model.to(device)
+        else:
+            model = torch.load(g, map_location='cpu')
+
+    print_msg("  Start Eval  ")
+    model.eval()
+
+    # Enumerate bodies
+    r_num = head_rdict.__len__()-1
+    batch_size = 1000
+    rule_len = args.learned_path_len
+    print("\nrule length:{}".format(rule_len))
+
+    probs = []
+    if allowed_body_idx:
+        _, body = enumerate_body_subset(allowed_body_idx, head_rdict, body_len=rule_len)
+    else:
+        _, body = enumerate_body(r_num, head_rdict, body_len=rule_len)
+
+    body_list = ["|".join(b) for b in body]
+    candidate_rule[rule_len] = body_list
+    n_epoches = math.ceil(float(len(body_list))/ batch_size)
+
+    # Precompute head mask vector to suppress non-allowed heads
+    if allowed_head_idx:
+        head_mask = torch.full((head_rdict.__len__(),), -1e9, device=device)
+        for idx in allowed_head_idx:
+            head_mask[idx] = 0.0
+    else:
+        head_mask = None
+
+    for epoches in range(n_epoches):
+        if epoches == n_epoches-1:
+            bodies = body_list[epoches*batch_size:]
+        else:
+            bodies = body_list[epoches*batch_size: (epoches+1)*batch_size]
+            
+        body_idx = body2idx(bodies, head_rdict)
+        inputs = torch.LongTensor(np.array(body_idx)).to(device) if torch.cuda.is_available() else torch.LongTensor(np.array(body_idx))
+        print("## body {}".format((epoches+1)* batch_size))
+            
+        with torch.no_grad():
+            pred_head, _entropy_loss = model(inputs)  # [batch_size, 2*n_rel+1]
+            # Mask out non-allowed heads before softmax so probabilities are among allowed only
+            if head_mask is not None and pred_head.shape[1] == head_mask.shape[0]:
+                pred_head = pred_head + head_mask  # add -1e9 to disallowed columns
             prob_ = torch.softmax(pred_head, dim=-1)
             probs.append(prob_.detach().cpu())
       
@@ -477,25 +565,34 @@ if __name__ == '__main__':
             print_msg("Generate Rule!")
             
             head_rdict = dataset.get_head_relation_dict()
-            n_rel = head_rdict.__len__()-1
+
+            # Reuse the same allowed head filter here for writing
+            allowed_heads = parse_name_list(getattr(args, "target_heads", "")) or None
+            if allowed_heads:
+                allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r in allowed_heads]
+            else:
+                allowed_head_idx = [i for i, r in head_rdict.idx2rel.items() if r != "None" and not r.startswith("inv_")]
+            if not allowed_head_idx:
+                print("WARNING: no heads to write; check --target_heads")
             
             for rule_len in rule_conf:
                 rule_path = "./{}_{}_{}.txt".format(args.output_file, args.topk, rule_len)
                 print("\nrule length:{}".format(rule_len))
-                sorted_val, sorted_idx = torch.sort(rule_conf[rule_len],0, descending=True)
-                
-                n_rules, _ = sorted_val.shape
-                
+                sorted_val, sorted_idx = torch.sort(rule_conf[rule_len], 0, descending=True)
+
+                n_rules, n_heads = sorted_val.shape
+                print(f"Writing heads: {[head_rdict.idx2rel[i] for i in allowed_head_idx]}")
+
                 with open(rule_path, 'w') as g:
-                    for r in range(n_rel):
+                    for r in allowed_head_idx:
                         head = head_rdict.idx2rel[r]
                         idx = 0
+                        # Take top-k bodies for this head
                         while idx<args.topk and idx<n_rules:
-                            conf = sorted_val[idx, r]
-                            body = candidate_rule[rule_len][sorted_idx[idx, r]]
+                            conf = sorted_val[idx, r].item()
+                            body = candidate_rule[rule_len][sorted_idx[idx, r].item()]
                             msg = "{:.3f} ({:.3f})\t{} <-- ".format(conf, conf, head)
                             body = body.split('|')
                             msg += ", ".join(body)
                             g.write(msg + '\n')
                             idx+=1
-

@@ -60,6 +60,13 @@ def enumerate_body(relation_num, rdict, body_len):
         all_body.append(b_)
     return all_body_idx, all_body
 
+def enumerate_body_subset(allowed_idx, rdict, body_len):
+    import itertools
+    all_body_idx = list(list(x) for x in itertools.product(allowed_idx, repeat=body_len))
+    idx2rel = rdict.idx2rel
+    all_body = [[idx2rel[x] for x in b_idx_] for b_idx_ in all_body_idx]
+    return all_body_idx, all_body
+
 
 def get_body(args, r_num, rdict, body_len):
     body_path = "../rules/{}/body_{}".format(args.data, body_len)
