@@ -61,6 +61,71 @@ def load_entities(path):
             idx2ent[idx] = e
     return idx2ent, ent2idx      
 
+def construct_descendant_for_rels(rdf_data, allowed_rels=None):
+    """
+    Build descendant map (head_entity -> list of (relation, tail_entity)) using only allowed_rels if provided.
+    Falls back to full construct_descendant when allowed_rels is None.
+    """
+    if allowed_rels is None:
+        return construct_descendant(rdf_data)
+    filtered = [rdf for rdf in rdf_data if parse_rdf(rdf)[1] in allowed_rels]
+    return construct_descendant(filtered)
+
+def construct_rule_seq_targeted(anchor_rdf, entity2desced_body, entity2desced_head,
+                                max_path_len=2, degree_cap=None, PRINT=False):
+    """
+    Targeted DFS miner starting at the head entity with an empty body.
+    Traverses only body relations (entity2desced_body) and checks for a direct head edge
+    anchor_h -> cur_node using entity2desced_head. Avoids global pruning by using
+    per-path 'visited'. Does NOT include the head relation in the body.
+    """
+    import random
+    anchor_h, head_rel, anchor_t = parse_rdf(anchor_rdf)
+
+    # Stack frames: (prev_node, body_path_str, cur_node, visited_nodes)
+    # Start at anchor_h with empty path; first expansion will create a 1-hop body.
+    stack = [(anchor_h, "", anchor_h, [anchor_h])]
+    stack_print = [f"{anchor_h}"]  # for optional debug printing
+    rule_seq, record = [], []
+    seen_rules = set()
+
+    while stack:
+        prev_node, path_str, cur_node, visited = stack.pop()
+        cur_print = stack_print.pop()
+
+        # If we have at least one hop in the body, we can check for a head edge to current node
+        path_len = 0 if not path_str else len(path_str.split('|'))
+        if path_len > 0:
+            head_edge = connected(entity2desced_head, anchor_h, cur_node)
+            if head_edge:
+                rule = f"{path_str}-{head_edge}"
+                if rule not in seen_rules:
+                    seen_rules.add(rule)
+                    rule_seq.append(rule)
+                    record.append(rule)
+                    if PRINT:
+                        print("rule body:\n{}".format(cur_print))
+                        print("rule head:\n{}-{}-{}".format(anchor_h, head_edge, cur_node))
+                        print("rule:\n{}\n".format(rule))
+
+        # Stop expanding once we hit max body length
+        if path_len >= max_path_len:
+            continue
+
+        # Expand along body graph
+        neighbors = entity2desced_body.get(cur_node, [])
+        if degree_cap is not None and len(neighbors) > degree_cap:
+            neighbors = random.sample(neighbors, degree_cap)
+
+        for r_next, t_next in neighbors:
+            if t_next in visited:
+                continue
+            # Build new body path string
+            new_path = r_next if path_len == 0 else f"{path_str}|{r_next}"
+            stack.append((cur_node, new_path, t_next, visited + [t_next]))
+            stack_print.append(f"{cur_print}-{r_next}-{t_next}")
+
+    return rule_seq, record
 
 class Dataset(object):
     def __init__(self, data_root, sparsity=1, inv=False):
