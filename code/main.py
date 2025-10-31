@@ -13,6 +13,7 @@ import numpy as np
 from data import *
 from utils import *
 from model import *
+from prolog_writer import write_prolog_rules
 
 
 import debugpy
@@ -534,6 +535,7 @@ if __name__ == '__main__':
     parser.add_argument("--alpha", type=float, default=1, help="increase output verbosity")
     parser.add_argument("--target_heads", default="", help="Comma-separated list or @file of head predicates to learn")
     parser.add_argument("--body_rels", default="", help="Comma-separated list or @file of predicates allowed in rule bodies")
+    parser.add_argument("--prolog_out", default="", help="If set, also write rules to a Prolog file at this path (e.g., ./rules.pl)")
 
     args = parser.parse_args()
     assert args.train or args.test
@@ -596,3 +598,13 @@ if __name__ == '__main__':
                             msg += ", ".join(body)
                             g.write(msg + '\n')
                             idx+=1
+            if args.prolog_out:
+                print_msg(f"Writing Prolog rules to {args.prolog_out}")
+                write_prolog_rules(
+                    head_rdict=head_rdict,
+                    candidate_rule=candidate_rule,
+                    rule_conf=rule_conf,
+                    allowed_head_idx=allowed_head_idx,
+                    topk=args.topk,
+                    out_path=args.prolog_out,
+                )

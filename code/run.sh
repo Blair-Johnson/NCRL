@@ -1,0 +1,1 @@
+python main.py --train --data nonisomorphic_rules/tsv --max_path_len 6 --model r4preds --gpu 0 --get_rule --topk 500 --target_heads @../datasets/nonisomorphic_rules/tsv/label_relations.txt --body_rels di_edge_0,di_edge_1,di_edge_2,di_edge_3,inv_di_edge_0,inv_di_edge_1,inv_di_edge_2,inv_di_edge_3 --output_file r4preds_rules --test --prolog_out ./learned_rules.pl
