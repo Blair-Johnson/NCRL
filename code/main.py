@@ -311,6 +311,8 @@ def test(args, dataset):
     print_msg("  Start Eval  ")
     model.eval()
 
+    amp_enabled = (device.type == 'cuda') and args.mixed_precision
+
     # Enumerate bodies
     r_num = head_rdict.__len__()-1
     batch_size = 1000
@@ -346,10 +348,11 @@ def test(args, dataset):
         print("## body {}".format((epoches+1)* batch_size))
             
         with torch.no_grad():
-            pred_head, _entropy_loss = model(inputs)  # [batch_size, 2*n_rel+1]
+            with autocast(enabled=amp_enabled):
+                pred_head, _entropy_loss = model(inputs)  # [batch_size, 2*n_rel+1]
             # Mask out non-allowed heads before softmax so probabilities are among allowed only
             if head_mask is not None and pred_head.shape[1] == head_mask.shape[0]:
-                pred_head = pred_head + head_mask  # add -1e9 to disallowed columns
+                pred_head = pred_head + head_mask.to(pred_head.dtype)  # add -1e9 to disallowed columns
             prob_ = torch.softmax(pred_head, dim=-1)
             probs.append(prob_.detach().cpu())
       

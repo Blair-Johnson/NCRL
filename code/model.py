@@ -71,7 +71,7 @@ class Encoder(nn.Module):
             output = inputs.detach().clone()
             
             zero = torch.zeros(emb_size).to(self.device)
-            output[full_batch, selected_rel_pair_idx, :] = selected_rel_pair
+            output[full_batch, selected_rel_pair_idx, :] = selected_rel_pair.to(output.dtype)
             output[full_batch, selected_rel_pair_idx+1, :] = zero
 
             output = output[output.sum(dim=-1)!=0]
