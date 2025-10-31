@@ -1,0 +1,3 @@
+[submodule "datasets/nonisomorphic_rules"]
+	path = datasets/nonisomorphic_rules
+	url = git@github.com:Blair-Johnson/nonisomorphic_rules.git
