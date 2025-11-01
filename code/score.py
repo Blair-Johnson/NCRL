@@ -40,7 +40,7 @@ def get_query_results(prolog):
     return results
 
 if __name__ == '__main__':
-    for preds in [2,4,8]:
+    for preds in [1,2,4,8]:
         print(f"==== Scoring {preds}-Pred Background ====")
         prolog = Prolog()
         stack_limit_gb = 2
@@ -55,7 +55,7 @@ if __name__ == '__main__':
             else:
                 prolog.assertz(fact.strip().strip('.'))
 
-        with open(f"../results/learned_rules_r{preds}.pl", "r") as f:
+        with open(f"../results2/learned_rules_r{preds}.pl", "r") as f:
             rules = [l[:l.find('.')+1] for l in f.readlines() if l.strip() and not l.startswith('%')]
 
         rule_results = {}
