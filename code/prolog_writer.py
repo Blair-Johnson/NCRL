@@ -75,3 +75,58 @@ def write_prolog_rules(
 
     with open(out_path, mode, encoding="utf-8") as f:
         f.write("\n".join(lines) + ("\n" if lines and not lines[-1].endswith("\n") else ""))
+
+
+def write_prolog_rules_global_topk(
+    *,
+    head_rdict,
+    candidate_rule: Dict[int, List[str]],
+    rule_conf: Dict[int, torch.Tensor],
+    allowed_head_idx: Sequence[int],
+    topk: int,
+    out_path: str,
+    include_conf_as_comment: bool = True,
+    append: bool = False,
+) -> None:
+    """
+    Global top-k across ALL rule lengths per head.
+    Aggregates confidence scores from each rule length and selects the best k.
+    """
+    mode = 'a' if append else 'w'
+    lines = []
+    if not append:
+        lines.append("% Auto-generated Prolog rules (GLOBAL TOPK across lengths)")
+        lines.append("% Variables: X and Y are the head arguments; Z1..Zk are intermediates.")
+        lines.append("")
+
+    allowed_head_idx = list(sorted(set(allowed_head_idx)))
+
+    for r in allowed_head_idx:
+        head_rel = head_rdict.idx2rel[r]
+        if head_rel == "None":
+            continue
+        head_str = _head_call(head_rel)
+        # Collect (conf, rule_len, body_idx)
+        agg: List[Tuple[float, int, int]] = []
+        for rule_len, conf_mat in rule_conf.items():
+            scores = conf_mat[:, r]
+            for body_idx, conf in enumerate(scores):
+                agg.append((conf.item(), rule_len, body_idx))
+        if not agg:
+            continue
+        agg.sort(key=lambda x: x[0], reverse=True)
+        lines.append(f"% ---- Global TopK for head: {head_rel} ----")
+        for (conf, rule_len, body_idx) in agg[:topk]:
+            body_str = candidate_rule[rule_len][body_idx]
+            body_rels = [b for b in body_str.split("|") if b]
+            if not body_rels:
+                continue
+            calls = _body_calls(body_rels)
+            rule_line = f"{head_str} :- {', '.join(calls)}."
+            if include_conf_as_comment:
+                rule_line += f"  % conf={conf:.6f}, len={rule_len}, head={head_rel}"
+            lines.append(rule_line)
+        lines.append("")
+
+    with open(out_path, mode, encoding="utf-8") as f:
+        f.write("\n".join(lines) + ("\n" if lines and not lines[-1].endswith("\n") else ""))

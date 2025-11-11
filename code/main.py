@@ -13,7 +13,7 @@ import numpy as np
 from data import *
 from utils import *
 from model import *
-from prolog_writer import write_prolog_rules
+from prolog_writer import write_prolog_rules, write_prolog_rules_global_topk
 from torch.cuda.amp import autocast, GradScaler
 
 import debugpy
@@ -344,21 +344,11 @@ def test(args, dataset):
 
     amp_enabled = (device.type == 'cuda') and args.mixed_precision
 
-    # Enumerate bodies
-    r_num = head_rdict.__len__()-1
+    # Always compute global top-k across lengths 1..learned_path_len
+    r_num = head_rdict.__len__() - 1
     batch_size = 1000
-    rule_len = args.learned_path_len
-    print("\nrule length:{}".format(rule_len))
-
-    probs = []
-    if allowed_body_idx:
-        _, body = enumerate_body_subset(allowed_body_idx, head_rdict, body_len=rule_len)
-    else:
-        _, body = enumerate_body(r_num, head_rdict, body_len=rule_len)
-
-    body_list = ["|".join(b) for b in body]
-    candidate_rule[rule_len] = body_list
-    n_epoches = math.ceil(float(len(body_list))/ batch_size)
+    max_len_to_score = args.learned_path_len
+    topk = args.topk
 
     # Precompute head mask vector to suppress non-allowed heads
     if allowed_head_idx:
@@ -368,27 +358,60 @@ def test(args, dataset):
     else:
         head_mask = None
 
-    for epoches in range(n_epoches):
-        if epoches == n_epoches-1:
-            bodies = body_list[epoches*batch_size:]
+    # Reset global containers
+    candidate_rule.clear()
+    rule_conf.clear()
+
+    print(f"\nScoring global top-k across lengths 1..{max_len_to_score}")
+    for rule_len in range(1, max_len_to_score + 1):
+        print(f"== Enumerating bodies length={rule_len}")
+        if allowed_body_idx:
+            _, body = enumerate_body_subset(allowed_body_idx, head_rdict, body_len=rule_len)
         else:
-            bodies = body_list[epoches*batch_size: (epoches+1)*batch_size]
-            
-        body_idx = body2idx(bodies, head_rdict)
-        inputs = torch.LongTensor(np.array(body_idx)).to(device) if torch.cuda.is_available() else torch.LongTensor(np.array(body_idx))
-        print("## body {}".format((epoches+1)* batch_size))
-            
-        with torch.no_grad():
-            with autocast(enabled=amp_enabled):
-                pred_head, _entropy_loss = model(inputs)  # [batch_size, 2*n_rel+1]
-            # Mask out non-allowed heads before softmax so probabilities are among allowed only
-            if head_mask is not None and pred_head.shape[1] == head_mask.shape[0]:
-                pred_head = pred_head + head_mask.to(pred_head.dtype)  # add -1e9 to disallowed columns
-            prob_ = torch.softmax(pred_head, dim=-1)
-            probs.append(prob_.detach().cpu())
-      
-    rule_conf[rule_len] = torch.cat(probs,dim=0)
-    print ("rule_conf",rule_conf[rule_len].shape)
+            _, body = enumerate_body(r_num, head_rdict, body_len=rule_len)
+
+        body_list = ["|".join(b) for b in body]
+        candidate_rule[rule_len] = body_list
+        n_epoches = math.ceil(float(len(body_list)) / batch_size)
+
+        probs = []
+        for epoches in range(n_epoches):
+            if epoches == n_epoches - 1:
+                bodies = body_list[epoches * batch_size:]
+            else:
+                bodies = body_list[epoches * batch_size: (epoches + 1) * batch_size]
+
+            body_idx = body2idx(bodies, head_rdict)
+            inputs = torch.LongTensor(np.array(body_idx)).to(device) if torch.cuda.is_available() else torch.LongTensor(np.array(body_idx))
+            print("## body {}".format((epoches + 1) * batch_size))
+
+            with torch.no_grad():
+                with autocast(enabled=amp_enabled):
+                    pred_head, _entropy_loss = model(inputs)  # [batch_size, 2*n_rel+1]
+                # Mask out non-allowed heads before softmax so probabilities are among allowed only
+                if head_mask is not None and pred_head.shape[1] == head_mask.shape[0]:
+                    pred_head = pred_head + head_mask.to(pred_head.dtype)
+                prob_ = torch.softmax(pred_head, dim=-1)
+                probs.append(prob_.detach().cpu())
+
+        rule_conf[rule_len] = torch.cat(probs, dim=0)
+        print("rule_conf[{}] shape: {}".format(rule_len, rule_conf[rule_len].shape))
+
+    # Write global top-k per head across all lengths
+    if getattr(args, "prolog_out", None):
+        print(f"Writing global top-{topk} rules per head (all lengths) to {args.prolog_out}")
+        write_prolog_rules_global_topk(
+            head_rdict=head_rdict,
+            candidate_rule=candidate_rule,
+            rule_conf=rule_conf,
+            allowed_head_idx=allowed_head_idx,
+            topk=topk,
+            out_path=args.prolog_out,
+            include_conf_as_comment=True,
+            append=True,
+        )
+    else:
+        print("No --prolog_out specified; skipping Prolog export.")
 
 if __name__ == '__main__':
     msg = "First Order Logic Rule Mining"
@@ -476,8 +499,9 @@ if __name__ == '__main__':
                             continue
 
                         # Append Prolog writer if requested
+                        """
                         if args.prolog_out:
-                            write_prolog_rules(
+                            write_prolog_rules_global_topk(
                                 head_rdict=head_rdict,
                                 candidate_rule=candidate_rule,
                                 rule_conf=rule_conf,
@@ -487,6 +511,7 @@ if __name__ == '__main__':
                                 include_conf_as_comment=True,
                                 append=True,  # NEW param
                             )
+                        """
             except Exception as e:
                 print(f"Skipping target after encountering exception: {e}")
                 continue
@@ -537,9 +562,10 @@ if __name__ == '__main__':
                                 msg += ", ".join(body)
                                 g.write(msg + '\n')
                                 idx+=1
+                """
                 if args.prolog_out:
                     print_msg(f"Writing Prolog rules to {args.prolog_out}")
-                    write_prolog_rules(
+                    write_prolog_rules_global_topk(
                         head_rdict=head_rdict,
                         candidate_rule=candidate_rule,
                         rule_conf=rule_conf,
@@ -547,3 +573,4 @@ if __name__ == '__main__':
                         topk=args.topk,
                         out_path=args.prolog_out,
                     )
+                """
