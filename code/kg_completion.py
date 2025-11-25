@@ -221,10 +221,11 @@ def kg_completion(rules, dataset, args):
             elif pred[i] == target_score:
                 n_tied += 1
         
-        # Tie-breaking: rank = m + (n+1)/2
-        # where n is the total tied group size (n_tied negatives + 1 positive)
-        tied_group_size = n_tied + 1
-        rank = m + (tied_group_size + 1) / 2
+        # Tie-breaking formula from problem statement: rank = m + (n+1)/2
+        # where: m = negatives strictly outranking the positive
+        #        n = total tied group size = (n_tied negatives) + (1 positive)
+        # Substituting: rank = m + ((n_tied + 1) + 1) / 2 = m + (n_tied + 2) / 2
+        rank = m + (n_tied + 2) / 2
       
         mrr.append(1.0/rank)
         head2mrr[q_r].append(1.0/rank)
