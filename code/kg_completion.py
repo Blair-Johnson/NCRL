@@ -60,19 +60,21 @@ class RuleDataset(Dataset):
     def __getitem__(self, idx):
         rel = self.idx2rel[idx]
         _rules = self.rules[rel]
-        path_count = sparse.dok_matrix((self.e_num,self.e_num))
+        score = sparse.dok_matrix((self.e_num,self.e_num))
         for rule in _rules:
             head, body, conf_1, conf_2 = rule
 
-            # NOTE: counts paths from each head to all tails via path defined by rule
+            # NOTE: compute reachability from each head to all tails via path defined by rule
             body_adj = sparse.eye(self.e_num)
             for b_rel in body:
                 body_adj = body_adj * self.r2mat[b_rel] 
-                    
+            
+            # Boolean scoring: path_count >= 1 → score 1, otherwise 0
+            body_adj = (body_adj >= 1).astype(float)
             body_adj = body_adj * conf_1
-            path_count+=body_adj
+            score += body_adj
         
-        return rel, path_count
+        return rel, score
     
     @staticmethod
     def collate_fn(data):
@@ -205,13 +207,24 @@ def kg_completion(rules, dataset, args):
         print(f'truth: {truth}')
         truth = [t for t in truth if t!=ent2idx[q_t]]
         
-        filtered_ranks = []
-        for i in range(len(pred_ranks)):
-            idx = pred_ranks[i]
-            if idx not in truth and pred[idx]> pred[ent2idx[q_t]]:
-                filtered_ranks.append(idx)
-                
-        rank = len(filtered_ranks)+1
+        target_score = pred[ent2idx[q_t]]
+        
+        # Count negatives strictly outranking the positive (m)
+        # and negatives tied with the positive (n_tied)
+        m = 0  # negatives with score > target_score
+        n_tied = 0  # negatives with score == target_score (excluding the positive itself)
+        for i in range(len(pred)):
+            if i == ent2idx[q_t] or i in truth:
+                continue  # skip the target and other positives
+            if pred[i] > target_score:
+                m += 1
+            elif pred[i] == target_score:
+                n_tied += 1
+        
+        # Tie-breaking: rank = m + (n+1)/2
+        # where n is the total tied group size (n_tied negatives + 1 positive)
+        tied_group_size = n_tied + 1
+        rank = m + (tied_group_size + 1) / 2
       
         mrr.append(1.0/rank)
         head2mrr[q_r].append(1.0/rank)
