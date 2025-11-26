@@ -36,7 +36,7 @@ class RuleDataset(Dataset):
     def __getitem__(self, idx):
         rel = self.idx2rel[idx]
         _rules = self.rules[rel]
-        path_count = sparse.dok_matrix((self.e_num,self.e_num))
+        score = sparse.dok_matrix((self.e_num,self.e_num))
         for rule in _rules:
             head, body, conf_1, conf_2 = rule
 
@@ -44,10 +44,11 @@ class RuleDataset(Dataset):
             for b_rel in body:
                 body_adj = body_adj * self.r2mat[b_rel] 
                     
-            body_adj = body_adj * conf_1
-            path_count+=body_adj
+            body_adj_discrete = (body_adj >= 1).astype(float)
+            body_adj_discrete = body_adj_discrete * conf_1
+            score+=body_adj
         
-        return rel, path_count
+        return rel, score
     
     @staticmethod
     def collate_fn(data):
@@ -180,13 +181,25 @@ def kg_completion(rules, dataset, args):
         truth = gt[(q_h, q_r)]
         truth = [t for t in truth if t!=ent2idx[q_t]]
         
-        filtered_ranks = []
-        for i in range(len(pred_ranks)):
-            idx = pred_ranks[i]
-            if idx not in truth and pred[idx]> pred[ent2idx[q_t]]:
-                filtered_ranks.append(idx)
-                
-        rank = len(filtered_ranks)+1
+        #filtered_ranks = []
+        #for i in range(len(pred_ranks)):
+        #    idx = pred_ranks[i]
+        #    if idx not in truth and pred[idx]> pred[ent2idx[q_t]]:
+        #        filtered_ranks.append(idx)
+        target_score = pred[ent2idx[q_t]]
+
+        m=0
+        n_tied=0
+        for i in range(len(pred)):
+            if i== ent2idx[q_t] or i in truth:
+                continue
+            if pred[i] > target_score:
+                m+=1
+            elif pred[i] == target_score:
+                n_tied+=1
+
+        #rank = len(filtered_ranks)+1
+        rank = m + ((n_tied+1) + 1)/2.0
       
         mrr.append(1.0/rank)
         head2mrr[q_r].append(1.0/rank)
