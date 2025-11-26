@@ -20,6 +20,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 head2mrr = defaultdict(list)
 head2hit_10 = defaultdict(list)
 head2hit_1 = defaultdict(list)
+head2hit_3 = defaultdict(list)
 
 class RuleDataset(Dataset):
     def __init__(self, r2mat, rules, e_num,idx2rel, args):
@@ -166,7 +167,7 @@ def kg_completion(rules, dataset, args):
             body2mat[head] = score_count
 
     
-    mrr, hits_1, hits_10  = [], [], []
+    mrr, hits_1, hits_3, hits_10  = [], [], [], []
     
     for q_i, query_rdf in enumerate(test_rdf):
         query = parse_rdf(query_rdf)
@@ -205,13 +206,15 @@ def kg_completion(rules, dataset, args):
         head2mrr[q_r].append(1.0/rank)
         
         hits_1.append(1 if rank<=1 else 0)
+        hits_3.append(1 if rank<=3 else 0)
         hits_10.append(1 if rank<=10 else 0)
         head2hit_1[q_r].append(1 if rank<=1 else 0)
+        head2hit_3[q_r].append(1 if rank<=3 else 0)
         head2hit_10[q_r].append(1 if rank<=10 else 0)
         print("rank at {}: {}".format(q_i, rank))
 
 
-    print("MRR: {} Hits@1: {} Hits@10: {}".format(np.mean(mrr), np.mean(hits_1), np.mean(hits_10)))
+    print("MRR: {} Hits@1: {} Hits@3: {} Hits@10: {}".format(np.mean(mrr), np.mean(hits_1), np.mean(hits_3), np.mean(hits_10)))
 
 
 def feq(relation, fact_rdf):
@@ -260,6 +263,10 @@ if __name__ == "__main__":
     
     print_msg("Stat on head and hit@1")
     for head, hits in head2hit_1.items():
+        print(head, np.mean(hits))
+
+    print_msg("Stat on head and hit@3")
+    for head, hits in head2hit_3.items():
         print(head, np.mean(hits))
 
     print_msg("Stat on head and hit@10")
