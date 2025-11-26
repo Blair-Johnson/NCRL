@@ -1,0 +1,17 @@
+[workspace]
+channels = ["conda-forge"]
+name = "NCRL"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+pytorch-gpu = "*"
+debugpy = ">=1.8.17,<2"
+swi-prolog = ">=9.0.4,<10"
+tqdm = ">=4.67.1,<5"
+
+[pypi-dependencies]
+pyswip = ">=0.3.3, <0.4"
+wrapt-timeout-decorator = ">=1.5.1, <2"
