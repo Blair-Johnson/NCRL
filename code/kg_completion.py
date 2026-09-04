@@ -47,7 +47,7 @@ class RuleDataset(Dataset):
                     
             body_adj_discrete = (body_adj >= 1).astype(float)
             body_adj_discrete = body_adj_discrete * conf_1
-            score+=body_adj
+            score += body_adj_discrete
         
         return rel, score
     
